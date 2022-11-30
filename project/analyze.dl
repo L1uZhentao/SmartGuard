@@ -1,0 +1,1625 @@
+// 20210528TODO: finish all cases of guard by Trusted_By_Call
+
+
+#define ENABLE_INPUT_FROM_FILES
+
+.number_type ArgIndex    // Index used to qualify block arguments
+.symbol_type Transfer    // ID of a transfer between blocks
+.symbol_type Name        // Name associated to an object
+.symbol_type SSA         // ID of a statement or block argument and its value
+.symbol_type Block       // ID of a basic block
+
+// -- input relations --
+
+// Entry block for a function
+.decl function(id_block: Block, name: Name)
+
+// All statements
+.decl statement(id: SSA)
+
+// All blocks
+.decl block(id_block: Block)
+
+// Associates blocks to contained statements
+.decl blockStmt(id_block: Block, id_stmt: SSA)
+
+// An input argument to a block
+.decl argument(id_arg: SSA,
+               id_block: Block,
+               index: ArgIndex)
+
+// Follows relation over statements within single blocks
+.decl follows(id_next: SSA, id_prev: SSA)
+
+.decl assign(id: SSA, var_id: SSA)                      // Assignments from var_id to id
+.decl const(id: SSA, value: symbol)                     // Constants
+.decl uop(id: SSA, id_var: SSA, op: Name)               // Unary operations
+.decl bop(id: SSA, id_lhs: SSA, id_rhs: SSA, op: Name)  // Binary operations
+
+.decl load(id: SSA, field: Name)                        // Storage field read
+.decl store(id: SSA, field: Name, var_id: SSA)          // Storage field write
+
+// Member access (e.g. msg.sender)
+.decl structLoad(id: SSA, id_struct: SSA, field: Name)
+
+// Member access (e.g. someStruct.value = x, not relevant for the project)
+.decl structStore(id: SSA, id_struct: SSA, field: Name, id_var: SSA)
+
+// Goto transfer with id `id_transfer` from `id_block_from` to `id_block_to`
+.decl goto(id_transfer: Transfer,
+           id_block_from: Block,
+           id_block_to: Block)
+
+// Conditional branching (think of two Goto's for each true/false branch)
+.decl branch(id_transfer_true: Transfer,
+             id_transfer_false: Transfer,
+             id_block_from: Block,
+             id_block_true: Block,
+             id_block_false: Block,
+             var_cond_id: SSA)  // `var_cond_id` references the condition
+
+// Jump from a block `id_block_from` to a different function with entry block
+// `id_block_to` (i.e. a function call). The called function returns to the
+// continuation block `id_continuation` of the caller function via return
+// transfers.
+.decl jump(id_transfer: Transfer,
+           id_block_from: Block,
+           id_block_to: Block,
+           id_continuation: Block)
+
+// Return transfer (note there is no target block; if needed, this can be
+// inferred at call sites via the `id_continuation` of the jump transfer).
+.decl return(id_transfer: Transfer, id_block_from: Block)
+
+// List of arguments passed in a transfer
+.decl transferArgument(id_transfer: Transfer, id_argument_value: SSA, index: ArgIndex)
+
+// Ignore these...
+//.decl arrayStore(id: SSA, id_array: SSA, id_index: SSA, id_var: SSA)
+//.decl mapStore(id: SSA, id_map: SSA, id_key: SSA, id_var: SSA)
+//.decl arrayLoad(id: SSA, id_array: SSA, id_index: SSA)
+//.decl mapLoad(id: SSA, id_map: SSA, id_key: SSA)
+//.decl call(id_transfer: Transfer, id_block_from: Block, id_block_to: Block, id_continuation: Block)
+//.decl unknownBlock(id_block: Block)
+.decl selfdestruct(id: SSA, address: SSA)
+.decl revert(id_transfer: Transfer, id_block: Block)
+.decl builtinVariable(id: SSA, name: symbol)
+
+#ifdef ENABLE_INPUT_FROM_FILES
+.input function
+.input block
+.input blockStmt
+.input follows
+.input argument
+.input statement
+.input assign
+.input const
+.input uop
+.input bop
+.input load
+.input structLoad
+.input store
+.input structStore
+.input goto
+.input branch
+.input return
+.input jump
+.input transferArgument
+.input selfdestruct
+.input revert
+.input builtinVariable
+// Ignore these...
+//.input arrayLoad
+//.input mapLoad
+//.input arrayStore
+//.input mapStore
+//.input call
+//.input unknownBlock
+#endif
+
+
+// Helper relations
+.decl msgSender(id: SSA)
+msgSender(id) :- builtinVariable(id, "SENDER").
+
+// -- output relations --
+.decl tainted_sinks(id: SSA)
+
+// Your code goes here...
+
+// [Section One] State Path and Block Path
+/*
+    state_path used for structuring statement execution sequence
+    state_path(id_after: SSA, id_before: SSA)
+    id_after executes after id_before
+*/ 
+.decl state_path(id_after: SSA, id_before: SSA)
+state_path(id_after, id_before) :- follows(id_after, id_before).
+state_path(id_after, id_before) :- follows(id_after, id_prev), state_path(id_prev, id_before).
+
+/*
+    state_path used for structuring block execution sequence(goto, branch, jump)
+    block_path(id_after: SSA, id_before: SSA)
+    id_after executes after id_before
+*/ 
+.decl block_path(id_after: Block, id_before: Block)
+block_path(id_after, id_before) :- block(id_after), block(id_before), id_before = id_after.
+block_path(id_after, id_before) :- goto(_, id_before, id_after).
+block_path(id_after, id_before) :- goto(_, id_previous, id_after), block_path(id_previous, id_before).
+block_path(id_after, id_before) :- branch(_, _, id_before, id_after, _, _).
+block_path(id_after, id_before) :- branch(_, _, id_before, _, id_after, _).
+block_path(id_after, id_before) :- branch(_, _, id_previous, id_after, _, _), block_path(id_previous, id_before).
+block_path(id_after, id_before) :- branch(_, _, id_previous, _, id_after, _), block_path(id_previous, id_before).
+// 0527 add 
+block_path(id_after, id_before) :- jump(_, id_before, _, id_after).
+
+
+// [Section Two] Direct Dependency //TODO: Other cases that depends on message sender
+// [Section 2-1] Direct Depend on Message Sender
+.decl DirectdepMS(i: SSA)
+//helper function
+.decl tmpDirectdepMS(i: SSA)
+// case1: assign and uop
+tmpDirectdepMS(i) :- msgSender(i).
+tmpDirectdepMS(i) :- assign(i, id), msgSender(id).
+tmpDirectdepMS(i) :- assign(i, id), tmpDirectdepMS(id).
+tmpDirectdepMS(i) :- uop(i, k, _), msgSender(k).
+
+// case2: consider load store
+//case2-1: if store in the same block
+tmpDirectdepMS(id) :- load(id, v), state_path(id, id2), store(id2, v, B),
+tmpDirectdepMS(B), !helper_function(id2, _, v).
+
+//case2-2: if in different block
+.decl DMSloadstoregood(i: SSA, B:SSA)
+.decl DMSloadstore(i: SSA, B:SSA)
+
+DMSloadstoregood(id, B):- load(id, v), !follows(id, _), 
+blockStmt(b1, id), store(id2, v, B), blockStmt(b2, id2), 
+!block_path(b2, b1), tmpDirectdepMS(B), !helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, but id3 is not store)
+DMSloadstoregood(id, B) :- load(id, v), state_path(id, id3), 
+!store(id3, _, _), blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), tmpDirectdepMS(B),
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, id3 store something but is not v)
+DMSloadstoregood(id, B) :- load(id, v), state_path(id, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), tmpDirectdepMS(B), 
+!helper_function(id2, _, v).
+
+DMSloadstore(id, B):- load(id, v), !follows(id, _), 
+blockStmt(b1, id), store(id2, v, B), blockStmt(b2, id2), 
+!block_path(b2, b1), !helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, but id3 is not store)
+DMSloadstore(id, B) :- load(id, v), state_path(id, id3), 
+!store(id3, _, _), blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1),
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, id3 store something but is not v)
+DMSloadstore(id, B) :- load(id, v), state_path(id, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), 
+!helper_function(id2, _, v).
+
+DirectdepMS(i) :- DMSloadstoregood(i, _), c1 = count:{DMSloadstoregood(i, _)}, c2 = count:{DMSloadstore(i, _)}, c1 = c2.
+
+// case3: consider bop
+tmpDirectdepMS(i) :- bop(i, k, m,_), msgSender(k), !taintedAfter(m, m).// 0527, !blockAfter(_, m).
+tmpDirectdepMS(i) :- bop(i, k, m,_), msgSender(k), !taintedAfter(m, m).// 0527, !blockAfter(_, m).
+tmpDirectdepMS(i) :- bop(i, m, k,_), msgSender(k), !taintedAfter(m, m).// 0527, !blockAfter(_, m).
+tmpDirectdepMS(i) :- bop(i, k, m,_), tmpDirectdepMS(k), !taintedAfter(m, m).// 0527, !blockAfter(_, m).
+tmpDirectdepMS(i) :- bop(i, m, k,_), tmpDirectdepMS(k), !taintedAfter(m, m).// 0527, !blockAfter(_, m).
+tmpDirectdepMS(i) :- bop(i, k, m,_), tmpDirectdepMS(k), tmpDirectdepMS(m).
+// TODO if the following two are incorrect
+tmpDirectdepMS(i) :- branch(_, _, _, t, f, k), tmpDirectdepMS(k), blockStmt(t, i), !taintedAfter(i, i).// 0527, !blockAfter(_, i).
+tmpDirectdepMS(i) :- branch(_, _, _, t, f, k), tmpDirectdepMS(k), blockStmt(f, i), !taintedAfter(i, i).// 0527, !blockAfter(_, i).
+DirectdepMS(i) :- tmpDirectdepMS(i).
+
+// [Section 2-2] Direct Depend on Argument
+.decl DirectdepArg(i: SSA, arg: SSA)
+DirectdepArg(i, arg) :- argument(arg, _, _), i = arg.
+DirectdepArg(i, arg) :- assign(i, arg), argument(arg, _, _).
+DirectdepArg(i, arg) :- uop(i, k, _), DirectdepArg(k, arg).
+
+// load store(Explicit )
+DirectdepArg(i, arg) :- blockStmt(_, i), load(i, v), state_path(i, id2), store(id2, v, arg),
+argument(arg, _, _), !helper_function(id2, _, v).
+
+DirectdepArg(id, arg) :- load(id, v), !follows(id, _), 
+blockStmt(b1, id), store(id2, v, arg), blockStmt(b2, id2), 
+!block_path(b2, b1), argument(arg, _, _), !helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, but id3 is not store)
+DirectdepArg(id, arg) :- load(id, v), state_path(id, id3), 
+!store(id3, _, _), blockStmt(b1, id), store(id2, v, arg), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), argument(arg, _, _), 
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, id3 store something but is not v)
+DirectdepArg(id, arg) :- load(id, v), state_path(id, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, id), store(id2, v, arg), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), argument(arg, _, _), 
+!helper_function(id2, _, v).
+
+// load store(Implicit )
+DirectdepArg(i, arg) :- blockStmt(_, i), load(i, v), state_path(i, id2), store(id2, v, _),
+DirectdepArg(id2, arg), !helper_function(id2, _, v).
+
+DirectdepArg(id, arg) :- load(id, v), !follows(id, _), 
+blockStmt(b1, id), store(id2, v, _), blockStmt(b2, id2), 
+!block_path(b2, b1), DirectdepArg(id2, arg), !helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, but id3 is not store)
+DirectdepArg(id, arg) :- load(id, v), state_path(id, id3), 
+!store(id3, _, _), blockStmt(b1, id), store(id2, v, _), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), DirectdepArg(id2, arg), 
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, id3 store something but is not v)
+DirectdepArg(id, arg) :- load(id, v), state_path(id, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, id), store(id2, v, _), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), DirectdepArg(id2, arg), 
+!helper_function(id2, _, v).
+
+DirectdepArg(i, arg) :- bop(i, arg, m,_), argument(arg, _, _), !taintedBefore(m, m), !blockAfter(_, m).
+DirectdepArg(i, arg) :- bop(i, m, arg,_), argument(arg, _, _), !taintedBefore(m, m), !blockAfter(_, m).
+DirectdepArg(i, arg) :- bop(i, k, m,_), DirectdepArg(k, arg), !taintedBefore(m, m), !blockAfter(_, m).
+DirectdepArg(i, arg) :- bop(i, m, k,_), DirectdepArg(k, arg), !taintedBefore(m, m), !blockAfter(_, m).
+DirectdepArg(i, arg) :- bop(i, k, m,_), DirectdepArg(k, arg), DirectdepArg(m, arg).
+// TODO the following two are incorrect
+DirectdepArg(i, arg) :- branch(_, _, _, t, f, k), DirectdepArg(k, arg), blockStmt(t, i). //, !taintedBefore(i, i), !blockAfter(_, i).
+DirectdepArg(i, arg) :- branch(_, _, _, t, f, k), DirectdepArg(k, arg), blockStmt(f, i). //, !taintedBefore(i, i), !blockAfter(_, i).
+
+
+// [Section 2-3] Direct Depend on SSA(in this case, maybe also depend on other values)
+
+.decl DirectdepSSA(i: SSA, i2: SSA)
+DirectdepSSA(i1, i1) :- variable_affected(i1, _).
+DirectdepSSA(arg, arg) :- argument(arg, _, _).
+DirectdepSSA(i, i2) :- assign(i, i2).
+DirectdepSSA(i, i2) :- uop(i, k, _), DirectdepSSA(k, i2).
+
+// load store(Explicit )
+DirectdepSSA(i, i2) :- blockStmt(_, i), load(i, v), state_path(i, id2), store(id2, v, i2),
+DirectdepSSA(id2, i2), !helper_function(id2, _, v).
+
+DirectdepSSA(i, i2) :- bop(i, m, k, _), DirectdepSSA(m, i2).
+DirectdepSSA(i, i2) :- bop(i, m, k, _), DirectdepSSA(k, i2).
+DirectdepSSA(i1, i2) :- DirectdepSSA(i1, i3), DirectdepSSA(i3, i2).
+
+// [Section 2-4] Only Depend on SSA(in this case, only depend on this value)
+
+.decl OnlydepSSA(i: SSA, i2: SSA)
+OnlydepSSA(i1, i1) :- variable_affected(i1, _).
+OnlydepSSA(arg, arg) :- argument(arg, _, _).
+OnlydepSSA(i, i2) :- assign(i, i2).
+OnlydepSSA(i, i2) :- uop(i, k, _), OnlydepSSA(k, i2).
+
+// load store(Explicit )
+OnlydepSSA(i, i2) :- blockStmt(_, i), load(i, v), state_path(i, id2), store(id2, v, i2),
+OnlydepSSA(id2, i2), !helper_function(id2, _, v).
+
+OnlydepSSA(i, i2) :- bop(i, m, k, _), OnlydepSSA(m, i2), !taintedBefore(k, k).
+OnlydepSSA(i, i2) :- bop(i, m, k, _), OnlydepSSA(k, i2), !taintedBefore(m, m).
+OnlydepSSA(i1, i2) :- OnlydepSSA(i1, i3), OnlydepSSA(i3, i2).
+
+// [Section 2-5] Implicit Dependency
+
+.decl BlockImplicitDependarg(b: Block, id: SSA) // BlockB implicitly depend on argument id.
+.decl BlockImplicitDependtaint(b: Block, id: SSA) // BlockB implicitly depend on some tainted value.
+.decl ImplicitDependarg(id1: SSA, id2: SSA) // Implicitly Depends on argument
+.decl ImplicitDependtaint(id1: SSA, id2: SSA) // Implicitly Depends on tainted value
+.decl ImplicitDepend(id1: SSA, id2: SSA) // Implicitly Depends on some SSA
+
+BlockImplicitDependarg(t, arg) :- branch(_, _, b, t, f, i2), bop(i2, _, _, _), DirectdepArg(i2, arg).
+BlockImplicitDependarg(f, arg) :- branch(_, _, b, t, f, i2), bop(i2, _, _, _), DirectdepArg(i2, arg).
+
+BlockImplicitDependtaint(t, B) :- branch(_, _, b, t, f, i3), blockStmt(b, i3), bop(i3, i2, _, _), taintedAfter(i2, i2), taintedpassforcg(i2, B).
+BlockImplicitDependtaint(t, B) :- branch(_, _, b, t, f, i3), blockStmt(b, i3), bop(i3, _, i2, _), taintedAfter(i2, i2), taintedpassforcg(i2, B).
+BlockImplicitDependtaint(f, B) :- branch(_, _, b, t, f, i3), blockStmt(b, i3), bop(i3, i2, _, _), taintedAfter(i2, i2), taintedpassforcg(i2, B).
+BlockImplicitDependtaint(f, B) :- branch(_, _, b, t, f, i3), blockStmt(b, i3), bop(i3, _, i2, _), taintedAfter(i2, i2), taintedpassforcg(i2, B).
+
+BlockImplicitDependarg(b1, A) :- BlockImplicitDependarg(b2, A), block_path(b1, b2).
+BlockImplicitDependtaint(b1, A) :- BlockImplicitDependtaint(b2, A), block_path(b1, b2).
+
+ImplicitDependarg(id1, arg) :- BlockImplicitDependarg(b, arg), blockStmt(b, id1).
+ImplicitDependarg(id2, arg) :- BlockImplicitDependarg(b, arg), blockStmt(b, id1), store(id1, v, id2).
+ImplicitDependarg(id3, arg) :- ImplicitDependarg(id2, arg), taintedpassforcg(id3, id2).
+// add 0601 consider jump
+ImplicitDependarg(id1, arg) :- BlockImplicitDependarg(b, arg), jump(tjump, b, _, _),
+transferArgument(tjump, id1, _).
+
+
+
+ImplicitDependtaint(id1, arg) :- BlockImplicitDependtaint(b, arg), blockStmt(b, id1).
+ImplicitDependtaint(id2, arg) :- BlockImplicitDependtaint(b, arg), blockStmt(b, id1), store(id1, v, id2).
+ImplicitDependtaint(id3, arg) :- ImplicitDependtaint(id2, arg), taintedpassforcg(id3, id2).
+// add 0601 consider jump
+ImplicitDependtaint(id1, arg) :- BlockImplicitDependtaint(b, arg), jump(tjump, b, _, _),
+transferArgument(tjump, id1, _).
+
+
+// the argument is in another function
+ImplicitDepend(id, arg) :- ImplicitDependarg(id, arg), jump(t0, bfrom, bto, bcont),
+transferArgument(t0, i0, idx), argument(arg, bto, idx), taintedpassforcg(i0, _).
+
+// the argument is in the same function // change blockStmt to as_helper 0601
+ImplicitDepend(id, arg) :- ImplicitDependarg(id, arg), as_helper(b1, id), argument(arg, b2, _),
+block_path(b1, b2).
+
+ImplicitDepend(id, arg) :- ImplicitDependtaint(id, arg).
+
+// Add 0601 ImplicitDepend passing between block
+
+ImplicitDepend(B, id) :- ImplicitDepend(A, id), store(_, v, A), load(B, v).
+
+/*
+    [Section 2-6] Tainted pass relationship by Load and store
+    .decl taintedpass(id1: SSA, id2: SSA, b1: Block, b2: Block)
+    id1 from block b1 
+        is tainted because of 
+    id2 from block b2 
+*/
+
+.decl taintedpass(id1: SSA, id2: SSA, b1: Block, b2: Block)
+// some tainted value stored in other blocks (A follows nothing)
+taintedpass(A, B, b1, b2) :- id = A, load(A, v), !follows(A, _), 
+blockStmt(b1, A), store(id2, v, B), blockStmt(b2, id2), 
+!block_path(b2, b1), taintedBefore(id2, B), !helper_function(id2, _, v).
+
+// some tainted value stored in other blocks (A state after id3, but id3 is not store)
+taintedpass(A, B, b1, b2) :- id = A, load(A, v), state_path(A, id3), 
+!store(id3, _, _), blockStmt(b1, A), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), taintedBefore(id2, B), 
+!helper_function(id2, _, v).
+
+// some tainted value stored in other blocks (A state after id3, id3 store something but is not v)
+taintedpass(A, B, b1, b2) :- id = A, load(A, v), state_path(A, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, A), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), taintedBefore(id2, B), 
+!helper_function(id2, _, v).
+
+// taintedpassforcg(taintedpass + DirectdepSSA) // 0525evening
+.decl taintedpassforcg(id1: SSA, id2: SSA)
+taintedpassforcg(id, A) :- taintedpass(id, A, _, _).
+taintedpassforcg(id, A) :- DirectdepSSA(id, B), taintedpass(B, A, _, _). 
+//delete0529 taintedpassforcg(id, A) :- taintedpass(id, B), taintedpass(B, A). 
+// taintedpassforsg(taintedpass + OnlydepSSA) //0529
+.decl taintedpassforsg(id1: SSA, id2: SSA)
+taintedpassforsg(id, A) :- taintedpass(id, A, _, _).
+taintedpassforsg(id, A) :- OnlydepSSA(id, B), taintedpass(B, A, _, _). 
+//delete0529 taintedpassforsg(id, A) :- taintedpassforsg(id, B), taintedpassforsg(B, A). 
+
+
+/*
+    [Section 2-7] Tjump transfer replationship
+    .decl jump_transfer(a: SSA, idx: ArgIndex, bfrom: Block, bto: Block, t: Transfer)
+    argument (a) with index (idx) from block (bfrom) 
+        jump by calling function of block (bto)
+    and the transfer id is t
+    .decl jump_transfer_srt_end(a: SSA, index: ArgIndex, bfrom: Block, bto: Block, t: Transfer)
+    This is used to stucture relationship of stack function call, and only get relationship of start block and end block
+    EG:
+        function1 a1--> function2 a2--> function3 a3--> function4 a4--> function5(with argument a5)
+        The relationship is
+        jump_transfer_srt_end(a5, 0, b1, b5, t)
+*/
+
+.decl ret_is_trusted()
+
+.decl exist_bad_arg(t: Transfer, id: SSA) 
+exist_bad_arg(t, id) :- transferArgument(t, id, _), taintedAfter(id, id), !argument(id, _, _).
+
+.decl jump_transfer(a: SSA, idx: ArgIndex, bfrom: Block, bto: Block, t: Transfer)
+
+jump_transfer(a, idx, bfirst, bto, t) :- argument(a, bto, idx), transferArgument(t, s, idx), jump(t, bfrom, bto, _),
+block_path(bfrom, bfirst), first_block(bfirst), DirectdepArg(s, a2), argument(a2, bfirst, _).
+
+jump_transfer(a, idx, bfirst, bto, t) :- argument(a, bto, idx), transferArgument(t, s, idx), jump(t, bfrom, bto, _),
+block_path(bfrom, bfirst), first_block(bfirst), !jump(_, _, bfirst, _).
+
+/*
+jump_transfer(a, idx, bfirst, bto, t) :- argument(a, bto, idx), transferArgument(t, s, idx), jump(t, bfrom, bto, _),
+block_path(bfrom, bfirst), first_block(bfirst).
+*/
+
+/*
+jump_transfer(a, idx, bfirst, bto, t) :- argument(a, bto, idx), transferArgument(t, s, idx), jump(t, bfrom, bto, _),
+block_path(bfrom, bfirst), first_block(bfirst),
+return(treturn, breturn), block_path(breturn, bto), transferArgument(treturn, sreturn, _), DirectdepArg(sreturn, a),
+!exist_bad_arg(t, _).
+
+jump_transfer(a, idx, bfirst, bto, t) :- argument(a, bto, idx), transferArgument(t, s, idx), jump(t, bfrom, bto, _),
+block_path(bfrom, bfirst), first_block(bfirst),
+return(treturn, breturn), block_path(breturn, bto), transferArgument(treturn, sreturn, _), !DirectdepArg(sreturn, a),
+as_helper(breturn, sreturn), !taintedAfter(sreturn, sreturn), !ImplicitDepend(sreturn, _).
+*/
+
+
+jump_transfer(a2, idx, b1, b3, t) :- jump_transfer(a1, idx, b1, b2, t), jump_transfer(a2, idx, b2, b3, _).
+
+.decl jump_transfer_srt_end(a: SSA, idx: ArgIndex, bfrom: Block, bto: Block, t: Transfer)
+jump_transfer_srt_end(a, idx, b1, b2, t) :- jump_transfer(a, idx, b1, b2, t),
+!jump_transfer(_, _, b2, _, _), !jump_transfer(_, _, _, b1, _).
+
+.decl jump_transfer_srt_end_deter(a: SSA, idx: ArgIndex, bfrom: Block, bto: Block, t: Transfer)
+
+jump_transfer_srt_end_deter(sjump, idx1, b1, b4, t1) :- jump_transfer_srt_end(a1, idx1, b1, b2, t1),
+jump_transfer_srt_end(a2, idx2, b3, b4, t2), block_path(bbridge, b2), jump(tjump, bbridge, b3, _),
+block_path(bret, b4), return(treturn, bret), transferArgument(treturn, sreturn,_ ), 
+DirectdepArg(sreturn, a2), transferArgument(tjump, sjump, _).
+
+jump_transfer_srt_end_deter(sreturn, idx1, b1, b4, t1) :- jump_transfer_srt_end(a1, idx1, b1, b2, t1),
+jump_transfer_srt_end(a2, idx2, b3, b4, t2), block_path(bbridge, b2), jump(tjump, bbridge, b3, _),
+block_path(bret, b4), return(treturn, bret), transferArgument(treturn, sreturn,_ ), 
+!DirectdepArg(sreturn, a2).
+
+// All the argument pass to function call is untaited
+.decl all_arg_untainted(a: SSA, b: Block, index: ArgIndex)
+.decl all_arg_untainted_helper(a: SSA, b: Block, s: SSA, bsrt: Block, index: ArgIndex)
+.decl all_arg_untainted_helper_bad(a: SSA, b: Block, s: SSA, bsrt: Block, index: ArgIndex)
+all_arg_untainted_helper(a, b, s, bsrt, idx) :- argument(a, b, idx), transferArgument(t, s, idx), 
+jump_transfer_srt_end(a, idx, bsrt, b, t).
+all_arg_untainted_helper_bad(a, b, s, bsrt, idx) :- all_arg_untainted_helper(a, b, s, bsrt, idx),
+taintedAfter(s, s).//delete 0530 to fix 29.sol, !argument(s, bsrt, _).
+
+
+
+
+    //case1
+all_arg_untainted(a, b, idx) :- all_arg_untainted_helper(a, b, s, bsrt, idx),
+!all_arg_untainted_helper_bad(a, b, s, bsrt, idx).
+
+    //case2
+all_arg_untainted(a, b, idx) :- argument(a, b, idx), !jump_transfer_srt_end(a, idx, _, b, _).
+    //case3
+all_arg_untainted(a, b, idx) :- argument(a, b, idx), !transferArgument(t, _, idx), 
+jump(t, _, b, _).
+    //case4
+all_arg_untainted(a, b, idx) :- argument(a, b, idx), !jump(_ ,_ ,b ,_).
+
+
+//a helper function. If it is ImplicitDepend on a SSA n, n must be trusted.
+.decl IDhelper(i:SSA)
+IDhelper(i) :- bop(_, i, _,_), ImplicitDepend(i, _), c1 = count:{ImplicitDepend(i, _)}, 
+c2 = count:{ImplicitDepend(i, a), all_arg_untainted(a, b2, idx), as_helper(b1, i), block_path(b1, b2)}, c1 = c2.
+IDhelper(i) :- bop(_, _,i,_), ImplicitDepend(i, _), c1 = count:{ImplicitDepend(i, _)}, 
+c2 = count:{ImplicitDepend(i, a), all_arg_untainted(a, b2, idx), as_helper(b1, i), block_path(b1, b2)}, c1 = c2.
+
+
+
+/*
+    [Section 3] GUARD
+    .decl guard(block: Block, id: SSA) 
+    block: Block id, id: the SSA that is guarded
+*/
+.decl guard(block: Block, id: SSA)
+
+
+// [Section 3] Case1: base guard
+// Case1-1 Both the left and right is msg.sender
+guard(b, i) :- blockStmt(b, i), blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left), msgSender(right).
+
+// Case1-2 the left is msg.sender, the right is not tainted & not implicitly depended on sth
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left),
+!taintedBeforeForguard(i, right), !ImplicitDepend(right, _). //delete0529 !blockAfter(_, right).
+// The following one can solve 12-1
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left),
+!taintedBeforeForguard(i, right), IDhelper(right), as_helper(b, right).
+
+// Case1-3 the right is msg.sender, the left is not tainted & not implicitly depended on sth
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), 
+!taintedBeforeForguard(i, left),!ImplicitDepend(left, _). //delete0529  !blockAfter(_, left).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), 
+!taintedBeforeForguard(i, left), IDhelper(left), as_helper(b, left). 
+
+// case1-4 (0528 add) the left is msg.sender, the right is trusted due to functional call
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), Trusted_By_Call(b, right). 
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left), Trusted_By_Call(b, right). 
+// case1-5 (0528 add) the right is msg.sender, the left is trusted due to functional call
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), Trusted_By_Call(b, left). 
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), Trusted_By_Call(b, left). 
+
+// case1-6 the left depends on msg.sender, the right is not tainted & not implicitly depended on sth
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left),
+!taintedBeforeForguard(i, right), !ImplicitDepend(right, _). //delete0529,block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right). //TODO 0529 blockafter should we delete?
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left),
+!taintedBeforeForguard(i, right), IDhelper(right), as_helper(b, right).
+
+// case1-7 the right depends on msg.sender, the left is not tainted & not implicitly depended on sth
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), 
+!taintedBeforeForguard(i, left), !ImplicitDepend(left, _). //delete0529,block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), 
+!taintedBeforeForguard(i, left), IDhelper(left), as_helper(b, left). 
+
+// case1-8 both the left & right depends on msg.sender
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_),
+!msgSender(left), DirectdepMS(left), !msgSender(right), DirectdepMS(right).
+
+// 0529 add
+// case 1-9 one directly depends on the argument
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left), !ImplicitDepend(right, _),
+DirectdepArg(right, arg), blockStmt(b1, right), argument(arg, b2, _ ), block_path(b1, b2). 
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), !ImplicitDepend(left, _),
+DirectdepArg(left, arg), blockStmt(b1, left), argument(arg, b2, _ ), block_path(b1, b2). 
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), !ImplicitDepend(right, _),
+DirectdepArg(right, arg), blockStmt(b1, right), argument(arg, b2, _ ), block_path(b1, b2). 
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), !ImplicitDepend(left, _),
+DirectdepArg(left, arg), blockStmt(b1, left), argument(arg, b2, _ ), block_path(b1, b2). 
+
+// case 1-10: UOP TODO0530
+//guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), msgSender(input), uop(i, input, _).
+//guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), uop(i, input, _), !msgSender(input), DirectdepMS(input).
+
+
+// case 1-11: 
+// return an untainted SSA
+.decl call_guard_a(b: Block, id: SSA) 
+// return a msg.sender
+.decl call_guard_b(b: Block, id: SSA) 
+
+.decl bop_helper(i:SSA, s:SSA)
+bop_helper(i, id) :- bop(i, id, _, _).
+bop_helper(i, id) :- bop(i, _, id, _).
+// case 1-11-1: the first one is msg.sender/depend on msg.sender and the second one is a functional call (the return must be untainted)
+
+//return depends on the passing value and the passing value is good
+call_guard_a(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _), 
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+!taintedAfter(apass, apass).
+
+call_guard_a(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+!taintedAfter(apass, apass).
+
+//return is untainted
+call_guard_a(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), !taintedAfter(sret, sret).
+
+call_guard_a(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), !taintedAfter(sret, sret).
+
+call_guard_a(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+!taintedAfter(aend, aend).
+
+call_guard_a(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), argument(id, bcont, _),
+!taintedAfter(aend, aend).
+
+/* TODO 0602
+call_guard_a(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+Trusted_By_Call(_, aend).
+
+call_guard_a(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), argument(id, bcont, _),
+Trusted_By_Call(_, aend).
+*/
+
+
+
+// case 1-11-2: the first one is untainted and the second one is a functional call (msg.sender/depend on msg.sender)
+//return depends on the passing value and the passing value is msgsender/ depends on msgsender
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _), 
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+msgSender(apass).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+msgSender(apass).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _), 
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+DirectdepMS(apass).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump), transferArgument(tjump, apass, idx),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepArg(sret, aend),
+DirectdepMS(apass).
+
+//return is msgsender/ depends on msgsender
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), msgSender(sret).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), msgSender(sret).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), argument(id, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepMS(sret).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont), argument(aend, bend, _),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+return(tendret, bret), block_path(bret, bend), transferArgument(tendret, sret, _), DirectdepMS(sret).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+DirectdepMS(aend).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), assign(id, a), argument(a, bcont, _),
+msgSender(aend).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), argument(id, bcont, _),
+DirectdepMS(aend).
+
+call_guard_b(bcont, id) :- jump_transfer_srt_end_deter(aend, idx, bstrt, bend, tjump),
+jump(tjump, bstrt, _, bcont),
+bop_helper(i, id), argument(id, bcont, _),
+msgSender(aend).
+
+
+
+// 20220530
+// TODO0530 add implicit dependency
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left), call_guard_a(b, right).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), call_guard_a(b, right).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), call_guard_a(b, left).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), call_guard_a(b, right).
+
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, left),
+!taintedBeforeForguard(i, right), !ImplicitDepend(right, _).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, left),
+!taintedBeforeForguard(i, right), IDhelper(right), as_helper(b, right).
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, left),
+Trusted_By_Call(b, right).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, right),
+!taintedBeforeForguard(i, left), !ImplicitDepend(left, _).
+guard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, right),
+!taintedBeforeForguard(i, left), IDhelper(right), as_helper(b, left).
+fguard(b, i) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), call_guard_b(b, right),
+Trusted_By_Call(b, left).
+
+
+
+/*
+    // Case2: guard passing within block with direct relationship
+    guard(b, i) :- blockStmt(b, i), guard(b, id2), blockStmt(b, id2).
+    guard(b, id2) :- blockStmt(b, i), guard(b, i), argument(id2, b, _).
+    // Case3:  guard passing between linked blocks
+    // If block B is guarded, then all its following block will be guarded.
+    guard(b, id) :- blockStmt(b, id), goto(_, b1, b), guard(b1, _).
+    guard(b, id) :- blockStmt(b, id), branch(_, _, b1, b, _, _), guard(b1, _).
+    guard(b, id) :- blockStmt(b, id), branch(_, _, b1, _, b, _), guard(b1, _).
+    // 0525 some blocks dont have statement
+    guard(b, id) :- blockStmt(b, id), goto(_, b2, b), branch(_, _, b1, b2, _, _), guard(b1, _).
+    guard(b, id) :- blockStmt(b, id), goto(_, b2, b), branch(_, _, b1, _, b2, _), guard(b1, _).
+*/
+
+guard(b, i1) :- block(b), guard_passing_within_block(i1, i2), guard(b, i2).
+guard(b1, id) :- block(b1), guard_passing_between_block(id, b1, b2), guard(b2, _).
+
+
+// Case4: Conditional Guard
+
+//type A conditional guard: the first part is msg.sender / depend on msg.sender, while the second part depends on the argument
+.decl tmp_conditional_guard_a(block: Block, id: SSA, id_arg: SSA)
+tmp_conditional_guard_a(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), blockStmt(b, i), bop(i, left,right,_), msgSender(left), argument(arg0, b0, _), DirectdepArg(right, arg0).
+tmp_conditional_guard_a(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _),  blockStmt(b, i), bop(i, left,right,_), msgSender(right), argument(arg0, b0, _), DirectdepArg(left, arg0).
+tmp_conditional_guard_a(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), blockStmt(b, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), argument(arg0, b0, _), DirectdepArg(right, arg0).
+tmp_conditional_guard_a(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), blockStmt(b, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), argument(arg0, b0, _), DirectdepArg(left, arg0).
+
+//type B conditional guard: the first part is untainted, while the second part depends on the argument
+.decl tmp_conditional_guard_b(block: Block, id: SSA, id_arg: SSA)
+tmp_conditional_guard_b(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), bop(i, left,right,_), argument(arg0, b0, _), DirectdepArg(left, arg0), !taintedBeforeForguard(i, right), !blockAfter(_, right).
+tmp_conditional_guard_b(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), bop(i, left,right,_), argument(arg0, b0, _), DirectdepArg(left, arg0), 
+taintedBeforeForguard(i, right), taintedpassforcg(right, bridge), guard(_, bridge). 
+tmp_conditional_guard_b(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), bop(i, left,right,_), argument(arg0, b0, _), DirectdepArg(right, arg0), !taintedBeforeForguard(i, left), !blockAfter(_, left).
+tmp_conditional_guard_b(b0, i, arg0) :- return(treturn, _), transferArgument(treturn, i, _), bop(i, left,right,_), argument(arg0, b0, _), DirectdepArg(right, arg0), 
+taintedBeforeForguard(i, left), taintedpassforcg(left, bridge), guard(_, bridge). 
+
+//type C conditional guard: the first part is untainted, while the second part depends on msg.sender / depend on msg.sender
+.decl tmp_conditional_guard_c(block: Block, id: SSA)
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0), blockStmt(b, i), !msgSender(i), DirectdepMS(i).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0), blockStmt(b, i), bop(i, left,right,_), msgSender(left), msgSender(right).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), msgSender(left), !taintedBeforeForguard(i, right), !blockAfter(_, right).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), msgSender(right), !taintedBeforeForguard(i, left), !blockAfter(_, left).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), !taintedBeforeForguard(i, right), block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), !msgSender(right), DirectdepMS(right), !taintedBeforeForguard(i, left), block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right).
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), !msgSender(left), DirectdepMS(left), !msgSender(right), DirectdepMS(right).
+//0525evening plan variable_conditional_guard TODO a b d
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_),
+msgSender(left), taintedBeforeForguard(i, right), taintedpassforcg(right, bridge), guard(_, bridge). 
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), 
+msgSender(right), taintedBeforeForguard(i, left), taintedpassforcg(left, bridge), guard(_, bridge). 
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_),
+!msgSender(left), DirectdepMS(left), taintedBeforeForguard(i, right), taintedpassforcg(right, bridge), guard(_, bridge). 
+tmp_conditional_guard_c(b0, i) :- return(treturn, _), transferArgument(treturn, i, _), first_block(b0), block_path(b, b0),  blockStmt(b, i), bop(i, left,right,_), 
+!msgSender(right), DirectdepMS(right), taintedBeforeForguard(i, left), taintedpassforcg(left, bridge), guard(_, bridge).
+
+//type D conditional guard: both the first and the second part depends on the argument
+.decl tmp_conditional_guard_d(block: Block, id: SSA, id_left: SSA, id_right: SSA)
+tmp_conditional_guard_d(b0, i, arg1, arg2) :- return(treturn, _), transferArgument(treturn, i, _), bop(i, left,right,_), argument(arg1, b0, _), DirectdepArg(left, arg1), argument(arg2, b0, _), DirectdepArg(right, arg2).
+
+.decl bad_conditional_guard(block: Block, id: SSA)
+bad_conditional_guard(b0, i) :- transferArgument(_, i, _), first_block(b0), block_path(b, b0), blockStmt(b, i), 
+!tmp_conditional_guard_a(b0, i, _), !tmp_conditional_guard_b(b0, i, _),
+!tmp_conditional_guard_c(b0, i), !tmp_conditional_guard_d(b0, i, _, _).
+
+.decl conditional_guard_a(block: Block, id: SSA, id_arg: SSA)
+.decl conditional_guard_b(block: Block, id: SSA, id_arg: SSA)
+.decl conditional_guard_c(block: Block, id: SSA)
+.decl conditional_guard_d(block: Block, id: SSA, id_left: SSA, id_right: SSA)
+
+conditional_guard_a(b0, i, arg) :- tmp_conditional_guard_a(b0, i, arg), !bad_conditional_guard(b0, _).
+conditional_guard_b(b0, i, arg) :- tmp_conditional_guard_b(b0, i, arg), !bad_conditional_guard(b0, _).
+conditional_guard_c(b0, i) :- tmp_conditional_guard_c(b0, i), !bad_conditional_guard(b0, _).
+conditional_guard_d(b0, i, arg1, arg2) :- tmp_conditional_guard_d(b0, i, arg1, arg2), !bad_conditional_guard(b0, _).
+
+
+// 0526 contional guard passing. function call stack
+//conditional_guard_c(bcont, i):- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall),
+//transferArgument(t0, sguard, _), branch(_, _, bcont, _, _, sreturn), conditional_guard_c(bcall, sguard).
+
+conditional_guard_a(bfrom, i, arg) :- conditional_guard_a(bto, i1, arg1), jump(_, bfrom, bto, bcont),
+transferArgument(tret, i, _), transferArgument(tfrom, arg, idx), 
+return(tret, bret), block_path(bret, bcont),
+argument(arg, bfrom, idx), argument(arg1, bto, idx).
+
+cguard_valid_c(bcont, sreturn, bcall, sguard, sreturn) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), branch(_, _, bcont, _, _, sreturn), conditional_guard_c(bcall, sguard).
+
+cguard_valid_c(bcont, sassign, bcall, sguard, sassign) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont),
+return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_c(bcall, sguard).
+
+
+.decl cguard_valid_a(block1: Block, id1: SSA, block2: Block, id2: SSA, arg: SSA)
+.decl cguard_valid_b(block1: Block, id1: SSA, block2: Block, id2: SSA, arg: SSA)
+.decl cguard_valid_c(block1: Block, id1: SSA, block2: Block, id2: SSA, arg: SSA)
+.decl cguard_valid_d(block1: Block, id1: SSA, block2: Block, id2: SSA, arg1: SSA, arg2: SSA)
+.decl cvalid_helper(id: SSA)
+
+cvalid_helper(id) :- cguard_valid_a(_, id, _, _, _).
+cvalid_helper(id) :- cguard_valid_b(_, id, _, _, _).
+cvalid_helper(id) :- cguard_valid_c(_, id, _, _, _).
+cvalid_helper(id) :- cguard_valid_d(_, id, _, _, _, _).
+//0527 evening
+cvalid_helper(i1) :- cvalid_helper(i2), guard_passing_within_block(i1, i2).
+cvalid_helper(i1) :- blockStmt(b2, i2), cvalid_helper(i2), guard_passing_between_block(i1, b1, b2).
+cvalid_helper(i1) :- argument(i2, b2, _), cvalid_helper(i2), guard_passing_between_block(i1, b1, b2).
+// type A conditional guard
+
+//TODO0527 call after call
+cguard_valid_a(bcont, snew, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+!taintedAfter(sargu, sargu), transferArgument(tnew, snew, _), jump(tnew, bcont, _, _).
+
+// the argument pass is untainted 
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+!taintedAfter(sargu, sargu).//0527, !blockAfter(_, sargu).
+// 0527 not sure taintedpass
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+taintedAfter(sargu, sargu), taintedpass(sargu, bridge, _, _), guard(_, bridge).
+
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+taintedAfter(sargu, sargu), taintedpass(sargu, bridge, _, _), cvalid_helper(bridge).
+
+//TODO0527 not sure
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+taintedAfter(sargu, sargu), taintedpass(sargu, bridge, _, _), guard(_, bridge).
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+cvalid_helper(sargu).
+
+// the argument pass is untainted + the statemenet has assign
+cguard_valid_a(bcont, sassign, bcall, sguard, arg1) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont), return(t0, breturn), // block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+!taintedAfter(sargu, sargu).//0527, !blockAfter(_, sargu).
+// 0527 not sure taintedpass
+cguard_valid_a(bcont, sassign, bcall, sguard, arg1) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+!taintedAfter(sargu, sargu), taintedpass(sargu, bridge, _, _), guard(_, bridge).
+
+//TODO0527 add
+cguard_valid_a(bcont, sassign, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+cvalid_helper(sargu).
+
+// the argument pass is directly depend on message sender
+cguard_valid_a(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+DirectdepMS(sargu).
+// the argument pass is directly depend on message sender + the statemenet has assign
+cguard_valid_a(bcont, sassign, bcall, sguard, arg1) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_a(bcall, sguard, arg1), argument(arg1, bcall, idx),
+DirectdepMS(sargu).
+
+// type B conditional guard
+cguard_valid_b(bcont, sreturn, bcall, sguard, arg1) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+branch(_, _, bcont, _, _, sreturn), conditional_guard_b(bcall, sguard, arg1), argument(arg1, bcall, idx),
+DirectdepMS(sargu).
+
+cguard_valid_b(bcont, sassign, bcall, sguard, arg1) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_b(bcall, sguard, arg1), argument(arg1, bcall, idx),
+DirectdepMS(sargu).
+
+//0527 add
+cguard_valid_b(bcont, sreturn, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+conditional_guard_b(bcall, sguard, arg1), argument(arg1, bcall, idx),
+branch(_, _, bcont, _, _, sreturn), cvalid_helper(sargu).
+cguard_valid_b(bcont, sassign, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx),  assign(sassign, sreturn), first_state(sassign),
+conditional_guard_b(bcall, sguard, arg1), argument(arg1, bcall, idx),
+branch(_, _, bcont, _, _, sreturn), cvalid_helper(sargu).
+
+//TODO0527 call after call
+cguard_valid_b(bcont, snew, bcall, sguard, arg1) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+conditional_guard_b(bcall, sguard, arg1), argument(arg1, bcall, idx),
+!taintedAfter(sargu, sargu), transferArgument(tnew, snew, _), jump(tnew, bcont, _, _).
+
+// type C conditional guard
+// TODO not sure if bcall t1 should be in jump
+cguard_valid_c(bcont, sreturn, bcall, sguard, sreturn) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), branch(_, _, bcont, _, _, sreturn), conditional_guard_c(bcall, sguard).
+
+cguard_valid_c(bcont, sassign, bcall, sguard, sassign) :- blockStmt(bcont, sassign), jump(t1, _, bcall, bcont),
+return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), assign(sassign, sreturn), first_state(sassign),
+branch(_, _, bcont, _, _, sassign), conditional_guard_c(bcall, sguard).
+
+//TODO0527 call after call
+cguard_valid_c(bcont, snew, bcall, sguard, snew) :- jump(t1, _, bcall, bcont), return(t0, breturn), block_path(breturn, bcall),
+transferArgument(t0, sguard, _), transferArgument(t1, sargu, idx), 
+conditional_guard_c(bcall, sguard),
+!taintedAfter(sargu, sargu), transferArgument(tnew, snew, _), jump(tnew, bcont, _, _).
+
+// type D conditional guard
+//TODO0527 call after call
+//TODOTODO
+
+//1
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu1), !taintedAfter(sargu2, sargu2).//0526, !blockAfter(_, sargu2).
+
+//0527 add
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu1), cvalid_helper(sargu2).
+
+//TODO0527 not sure
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu1), taintedAfter(sargu2, sargu2), taintedpass(sargu2, bridge, _, _), guard(_, bridge).//0526, !blockAfter(_, sargu2).
+
+//2
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu2), !taintedAfter(sargu1, sargu1).//0526,  !blockAfter(_, sargu1).
+
+//0527 add
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu2), cvalid_helper(sargu1).
+
+//TODO0527 not sure
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu2), taintedAfter(sargu1, sargu1), taintedpass(sargu1, bridge, _, _), guard(_, bridge).//0526,  !blockAfter(_, sargu1).
+
+//3
+cguard_valid_d(bcont, sreturn, bcall, sguard, arg1, arg2) :- jump(_, _, _, bcont), return(t0, breturn), block_path(breturn, bcall), 
+transferArgument(t0, sguard, _), transferArgument(t1, sargu1, idx1), transferArgument(t1, sargu2, idx2),
+branch(_, _, bcont, _, _, sreturn), conditional_guard_d(bcall, sguard, arg1, arg2),
+argument(arg1, bcall, idx1), argument(arg2, bcall, idx2),
+DirectdepMS(sargu1), DirectdepMS(sargu2).
+
+fguard(b1, i1):- cguard_valid_a(b1, i1, _, _, _), 
+guard_cnt =  g1 + g2 + g3 + g4, 
+g1 = count:{cguard_valid_a(b1, i1, _, _, _)}, 
+g2 = count:{cguard_valid_b(b1, i1, _, _, _)}, 
+g3 = count:{cguard_valid_c(b1, i1, _, _, _)}, 
+g4 = count:{cguard_valid_d(b1, i1, _, _, _, _)},
+c1 = count:{cguard_valid_a(b1, i1, b01, id01, _), conditional_guard_a(b01, id01, _)},
+c2 = count:{cguard_valid_b(b1, i1, b02, id02, _), conditional_guard_b(b02, id02, _)},
+c3 = count:{cguard_valid_c(b1, i1, b03, id03, _),conditional_guard_c(b03, id03)},
+c4 = count:{cguard_valid_d(b1, i1, b04, id04, _, _), conditional_guard_d(b04, id04, _, _)}, 
+guard_cnt = c1 + c2 + c3 + c4.
+
+fguard(b1, i1):- cguard_valid_b(b1, i1, _, _, _), 
+guard_cnt =  g1 + g2 + g3 + g4, 
+g1 = count:{cguard_valid_a(b1, i1, _, _, _)}, 
+g2 = count:{cguard_valid_b(b1, i1, _, _, _)}, 
+g3 = count:{cguard_valid_c(b1, i1, _, _, _)}, 
+g4 = count:{cguard_valid_d(b1, i1, _, _, _, _)},
+c1 = count:{cguard_valid_a(b1, i1, b01, id01, _), conditional_guard_a(b01, id01, _)},
+c2 = count:{cguard_valid_b(b1, i1, b02, id02, _), conditional_guard_b(b02, id02, _)},
+c3 = count:{cguard_valid_c(b1, i1, b03, id03, _),conditional_guard_c(b03, id03)},
+c4 = count:{cguard_valid_d(b1, i1, b04, id04, _, _), conditional_guard_d(b04, id04, _, _)}, 
+guard_cnt = c1 + c2 + c3 + c4.
+
+fguard(b1, i1):- cguard_valid_c(b1, i1, _, _, _), 
+guard_cnt =  g1 + g2 + g3 + g4, 
+g1 = count:{cguard_valid_a(b1, i1, _, _, _)}, 
+g2 = count:{cguard_valid_b(b1, i1, _, _, _)}, 
+g3 = count:{cguard_valid_c(b1, i1, _, _, _)}, 
+g4 = count:{cguard_valid_d(b1, i1, _, _, _, _)},
+c1 = count:{cguard_valid_a(b1, i1, b01, id01, _), conditional_guard_a(b01, id01, _)},
+c2 = count:{cguard_valid_b(b1, i1, b02, id02, _), conditional_guard_b(b02, id02, _)},
+c3 = count:{cguard_valid_c(b1, i1, b03, id03, _),conditional_guard_c(b03, id03)},
+c4 = count:{cguard_valid_d(b1, i1, b04, id04, _, _), conditional_guard_d(b04, id04, _, _)}, 
+guard_cnt = c1 + c2 + c3 + c4.
+
+fguard(b1, i1):- cguard_valid_d(b1, i1, _, _, _, _), 
+guard_cnt =  g1 + g2 + g3 + g4, 
+g1 = count:{cguard_valid_a(b1, i1, _, _, _)}, 
+g2 = count:{cguard_valid_b(b1, i1, _, _, _)}, 
+g3 = count:{cguard_valid_c(b1, i1, _, _, _)}, 
+g4 = count:{cguard_valid_d(b1, i1, _, _, _, _)},
+c1 = count:{cguard_valid_a(b1, i1, b01, id01, _), conditional_guard_a(b01, id01, _)},
+c2 = count:{cguard_valid_b(b1, i1, b02, id02, _), conditional_guard_b(b02, id02, _)},
+c3 = count:{cguard_valid_c(b1, i1, b03, id03, _),conditional_guard_c(b03, id03)},
+c4 = count:{cguard_valid_d(b1, i1, b04, id04, _, _), conditional_guard_d(b04, id04, _, _)}, 
+guard_cnt = c1 + c2 + c3 + c4.
+
+
+// before 0525 seperately
+// guard(b1, i1):- cguard_valid_a(b1, i1, b, id, _), guard_cnt = count:{cguard_valid_a(b1, i1, b, id, _)}, cond_cnt = count:{conditional_guard_a(b, id, _)}, guard_cnt = cond_cnt.
+// guard(b1, i1):- cguard_valid_b(b1, i1, b, id, _), guard_cnt = count:{cguard_valid_b(b1, i1, b, id, _)}, cond_cnt = count:{conditional_guard_b(b, id, _)}, guard_cnt = cond_cnt.
+// guard(b1, i1):- cguard_valid_c(b1, i1, b, id, _), guard_cnt = count:{cguard_valid_c(b1, i1, b, id, _)}, cond_cnt = count:{conditional_guard_c(b, id)}, guard_cnt = cond_cnt.
+// guard(b1, i1):- cguard_valid_d(b1, i1, b, id, _, _), guard_cnt = count:{cguard_valid_d(b1, i1, b, id, _, _)}, cond_cnt = count:{conditional_guard_d(b, id, _, _)}, guard_cnt = cond_cnt.
+
+
+.decl cnt1(x: number)
+// cnt1(g) :- g = count:{cguard_valid_b(b1, i1, b02, id02, _)}.
+cnt1(g) :- cguard_valid_b(b1, i1, _, _, _),g =  g1 + g2 + g3 + g4, 
+g1 = count:{cguard_valid_a(b1, i1, _, _, _)}, 
+g2 = count:{cguard_valid_b(b1, i1, _, _, _)}, 
+g3 = count:{cguard_valid_c(b1, i1, _, _, _)}, 
+g4 = count:{cguard_valid_d(b1, i1, _, _, _, _)}.
+.decl cnt2(x: number)
+cnt2(c) :- cguard_valid_b(b1, i1, _, _, _), c = c1 + c2 + c3 + c4,
+c1 = count:{cguard_valid_a(b1, i1, b01, id01, _), conditional_guard_a(b01, id01, _)},
+c2 = count:{cguard_valid_b(b1, i1, b02, id02, _), conditional_guard_b(b02, id02, _)},
+c3 = count:{cguard_valid_c(b1, i1, b03, id03, _),conditional_guard_c(b03, id03)},
+c4 = count:{cguard_valid_d(b1, i1, b04, id04, _, _), conditional_guard_d(b04, id04, _, _)}.
+
+
+// Case5: Variable Guard solve guard depend on tainted, tainted depend on guard
+// 0524 
+.decl variable_affected(id1: SSA, id2: SSA)
+
+variable_affected(id, B):- load(id, v), !follows(id, _), 
+blockStmt(b1, id), store(id2, v, B), blockStmt(b2, id2), // 0525 !block_path(b2, b1), 
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, but id3 is not store)
+variable_affected(id, B) :- load(id, v), state_path(id, id3), 
+!store(id3, _, _), blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, // 0525 !block_path(b2, b1),
+!helper_function(id2, _, v).
+
+// some value stored in other blocks (A state after id3, id3 store something but is not v)
+variable_affected(id, B) :- load(id, v), state_path(id, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, id), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, // 0525 !block_path(b2, b1),
+!helper_function(id2, _, v).
+
+.decl variable_guard(block: Block, id: SSA, s: SSA)
+
+variable_guard(b, id, right) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(left), 
+taintedBeforeForguard(i, right), taintedpassforsg(right, id). // DirectdepSSA(right, bridge), variable_affected(bridge, id). //dontconsiderblockafter, !blockAfter(_, right).
+variable_guard(b, id, left) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), msgSender(right), 
+taintedBeforeForguard(i, left), taintedpassforsg(left, id). // DirectdepSSA(left, bridge), variable_affected(bridge, id). //dontconsiderblockafter, !blockAfter(_, left).
+variable_guard(b, id, right) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(left),
+DirectdepMS(left), taintedBeforeForguard(i, right), taintedpassforsg(right, id). // DirectdepSSA(right, bridge), variable_affected(bridge, id). //dontconsiderblockafter block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right).
+variable_guard(b, id, left) :- blockStmt(b, i), branch(_, _, _, _, _, i), bop(i, left,right,_), !msgSender(right), 
+DirectdepMS(right), taintedBeforeForguard(i, left), taintedpassforsg(left, id). // DirectdepSSA(left, bridge), variable_affected(bridge, id). //dontconsiderblockafter block(b2), b2!=b, !blockAfter(b2, left), block(b3), b3!=b, !blockAfter(b2, right).
+
+.decl vguard_helper(b: Block, s: SSA)
+vguard_helper(b, s) :- blockStmt(b, s), DirectdepSSA(s, a), argument(a, b, _ ).
+
+.decl good_vguard(block: Block, id: SSA, s: SSA)
+.decl bad_vguard(block: Block, id: SSA, s: SSA)
+//0525 change taintedbefore to taintedafter
+//0529delete good_vguard(b1, i1, s) :- variable_guard(b1, i1, s), !taintedAfter(i1, i1),  !argument(i1, _, _ ), !vguard_helper(b1, s).
+//0529delete good_vguard(b1, i1, s) :- variable_guard(b1, i1, s), guard(b2, i1), !vguard_helper(b1, s).
+
+good_vguard(b1, i1, s) :- variable_guard(b1, i1, s), guard(_, i1), !ImplicitDepend(s, _).
+//0529 TODO here
+good_vguard(b1, i1, s) :- variable_guard(b1, i1, s), good_vguard(b, _, _),  as_helper(b, i1), !ImplicitDepend(s, _).
+//count:{variable_guard(b1, _, s)} = 1.
+//good_vguard(b1, i1, s) :- variable_guard(b1, i1, s), good_vguard(b, _, s2),  blockStmt(b, i1), !ImplicitDepend(s, _),
+//count:{variable_guard(b1, _, s)} = count:{variable_guard(b, i2, s2), guard(_, i2), !ImplicitDepend(s, _)}.
+
+
+.decl as_helper(b: Block, s: SSA)
+as_helper(b, s) :- argument(s, b, _ ).
+as_helper(b, s) :- blockStmt(b, s).
+
+
+// two loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2),
+as_helper(b1, i2), as_helper(b2, i1),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2).
+
+// three loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2), variable_guard(b3, i3, s3),
+as_helper(b1, i3), as_helper(b2, i1), as_helper(b3, i2),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2), !vguard_helper(b3, s3).
+
+// four loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2),
+variable_guard(b3, i3, s3), variable_guard(b4, i4, s4),
+as_helper(b1, i4), as_helper(b2, i1), as_helper(b3, i2), as_helper(b4, i3),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2), !vguard_helper(b3, s3), !vguard_helper(b4, s4).
+
+// five loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2), 
+variable_guard(b3, i3, s3), variable_guard(b4, i4, s4), variable_guard(b5, i5, s5),
+as_helper(b1, i5), as_helper(b2, i1), as_helper(b3, i2), as_helper(b4, i3), as_helper(b5, i4),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2), !vguard_helper(b3, s3),
+!vguard_helper(b4, s4), !vguard_helper(b5, s5).
+
+// six loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2), variable_guard(b3, i3, s3),
+variable_guard(b4, i4, s4), variable_guard(b5, i5, s5), variable_guard(b6, i6, s6),
+as_helper(b1, i6), as_helper(b2, i1), as_helper(b3, i2), as_helper(b4, i3), as_helper(b5, i4), as_helper(b6, i5),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2), !vguard_helper(b3, s3),
+!vguard_helper(b4, s4), !vguard_helper(b5, s5), !vguard_helper(b6, s6).
+
+// seven loop
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), variable_guard(b2, i2, s2), variable_guard(b3, i3, s3),
+variable_guard(b4, i4, s4), variable_guard(b5, i5, s5), variable_guard(b6, i6, s6), variable_guard(b7, i7, s7),
+as_helper(b1, i7), as_helper(b2, i1), as_helper(b3, i2), as_helper(b4, i3),
+as_helper(b5, i4), as_helper(b6, i5), as_helper(b7, i6),
+!vguard_helper(b1, s1), !vguard_helper(b2, s2), !vguard_helper(b3, s3),
+!vguard_helper(b4, s4), !vguard_helper(b5, s5), !vguard_helper(b6, s6), !vguard_helper(b7, s7).
+
+
+// To solve loop more than four
+/*
+.decl storage_helper(b: Block, i: SSA, s: SSA)
+storage_helper(b, i, s) :- variable_guard(b, i, s), !argument(i, _, _ ).
+
+good_vguard(b1, i1, s1) :- variable_guard(b1, i1, s1), argument(i1, _, _ ).
+*/
+
+.decl good_fguard(block: Block, id: SSA)
+.decl bad_fguard(block: Block, id: SSA)
+good_fguard(b1, s):- variable_guard(b1, _, s), total_cnt = count:{variable_guard(b1, _, s)},
+good_cnt = count:{good_vguard(b1, _, s)}, total_cnt = good_cnt.
+bad_fguard(b1, s):- variable_guard(b1, _, s), total_cnt = count:{variable_guard(b1, _, s)},
+good_cnt = count:{good_vguard(b1, _, s)}, total_cnt != good_cnt.
+
+//TODO: use fguard?
+.decl debugfguard(block: Block, id: SSA)
+.decl fguard(block: Block, id: SSA)
+fguard(b, id) :- guard(b, id).
+fguard(b, id) :- good_fguard(b, id), taintedpass(_, _, b, b2),  guard(b2, _).
+fguard(b, id) :- good_fguard(b, id), taintedpass(_, _, b, b2),  good_fguard(b2, _).
+fguard(b, id) :- good_fguard(b, id), taintedpass(_, _, b, b2),  block_path(b2, b3), good_fguard(b3, _).
+fguard(b, id) :- good_fguard(b, id), taintedpass(_, _, b, b2),  block_path(b3, b2), good_fguard(b3, _).
+
+//fguard(b1, s1):- good_fguard(b1, s1), good_fguard(b2, s2), taintedpassforsg(s1, s3),
+//blockStmt(b, s2), blockStmt(b, s3).
+
+//fguard(b1, s):- variable_guard(b1, _, s), total_cnt = count:{variable_guard(b1, _, s)},
+//good_cnt = count:{good_vguard(b1, _, s)}, total_cnt = good_cnt.
+
+
+
+// then passing
+.decl guard_passing_within_block(i1: SSA, i2: SSA)
+.decl guard_passing_between_block(i1: SSA, b1: Block, b2: Block) // b2 is guarded then b1 is guraded
+guard_passing_within_block(i1, i2) :- blockStmt(b, i1), blockStmt(b, i2).
+guard_passing_within_block(i1, i2) :- blockStmt(b, i1), argument(i2, b, _).
+guard_passing_within_block(i1, i2) :- blockStmt(b, i2), argument(i1, b, _).
+guard_passing_between_block(id, b, b1) :- blockStmt(b, id), goto(_, b1, b).
+guard_passing_between_block(id, b, b1) :- blockStmt(b, id), goto(_, b2, b), branch(_, _, b1, b2, _, _).
+guard_passing_between_block(id, b, b1) :- blockStmt(b, id), goto(_, b2, b), branch(_, _, b1, _, b2, _).
+guard_passing_between_block(id, b, b1) :- blockStmt(b, id), branch(_, _, b1, b, _, _).
+guard_passing_between_block(id, b, b1) :- blockStmt(b, id), branch(_, _, b1, _, b, _).
+
+
+fguard(b, i1) :- block(b), guard_passing_within_block(i1, i2), fguard(b, i2).
+fguard(b1, id) :- block(b1), guard_passing_between_block(id, b1, b2), fguard(b2, _).
+
+/* before 0527bad_vguard
+fguard(b, i) :- blockStmt(b, i), fguard(b, id2), blockStmt(b, id2).
+fguard(b, id2) :- blockStmt(b, i), fguard(b, i), argument(id2, b, _).
+// If block B is guarded, then all its following block will be guarded.
+fguard(b, id) :- blockStmt(b, id), goto(_, b1, b), fguard(b1, _).
+fguard(b, id) :- blockStmt(b, id), branch(_, _, b1, b, _, _), fguard(b1, _).
+fguard(b, id) :- blockStmt(b, id), branch(_, _, b1, _, b, _), fguard(b1, _).
+*/
+
+// TODO: more than two
+
+
+
+
+// Case6: guard passing between unlinked blocks
+.decl final_guard(block: Block, id: SSA)
+final_guard(b, id) :- fguard(b, id).
+
+//TODO 0525 unsure break 3 cases
+.decl guard_helper(block: Block, id: SSA)
+guard_helper(b1, i1):- load(i1, v), blockStmt(b1, i1),
+store(i2, v, _), blockStmt(b2, i2), !fguard(b2, i2), taintedBeforeForguard(i2, i2).
+final_guard(b, i) :- load(i, v), blockStmt(b, i),
+store(i2, v, _), blockStmt(b2, i2), fguard(b2, i2), !guard_helper(b, i).
+
+
+
+
+//.decl all_pair(block1: Block, id1: SSA, block2: Block, id2: SSA)
+//all_pair(b1, i1, b2, i2) :- load(i1, v), blockStmt(b1, i1),
+//store(i2, v, _), blockStmt(b2, i2).
+//.decl guard_pair(block1: Block, id1: SSA, block2: Block, id2: SSA)
+//guard_pair(b1, i1, b2, i2) :- load(i1, v), blockStmt(b1, i1),
+//store(i2, v, _), blockStmt(b2, i2), guard(b2, i2).
+//guard(b, i) :- cnt_all = count:{all_pair(b, i, _, _)},
+//cnt_guard = count:{guard_pair(b, i, _, _)}, cnt_all = cnt_guard. 
+
+ 
+
+.decl sanitize(statement_id:SSA, var_id:SSA)
+// Case 1: const is a sanitation
+sanitize(id, A) :- id = A, statement(id), assign(A, B), const(B, _).
+sanitize(id, A) :- id = A, statement(id), load(A, v), follows(A, C), store(C, v, B), const(B, _).
+
+//TODO 20210528 call_sanitize()
+.decl call_sanitize_cond(call_block: Block, pre_block: Block, sanitize_variable: SSA, reason: SSA)
+call_sanitize_cond(barg, barg, i, arg) :- as_helper(bvar, i), DirectdepArg(i, arg), argument(arg, barg, _), block_path(bvar, barg).
+
+// load store using tainted pass: TODO0528: if is affected by several stores? Maybe no bad influence?
+.decl call_sanitize_def_debug(call_block: Block, pre_block: Block, sanitize_variable: SSA)
+call_sanitize_cond(barg, barg, i, arg) :- taintedpass(i, arg, _, _), load(i, v), store(m , v, arg), 
+!guard(_, m), argument(arg, barg, _).
+call_sanitize_cond(barg, barg, i, arg) :- taintedpass(i, arg, _, _), load(i, v), store(m , v, arg), 
+guard(_, m), ImplicitDependarg(m, arg1), argument(arg, barg, _), argument(arg1, barg, _).
+
+/* delete 0601
+.decl arg_match_helper(t: Transfer, b: Block, a:SSA, idx: ArgIndex)
+arg_match_helper(tjump, bfrom, acall, idx) :- transferArgument(tjump, acall, idx), 
+DirectdepArg(acall, afrom), argument(afrom, bfrom, idx).
+// add 0601
+arg_match_helper(tjump, bfrom, acall, idx) :- transferArgument(tjump, acall, idx), 
+ImplicitDependarg(acall, afrom), argument(afrom, bfrom, idx).
+
+
+call_sanitize_cond(bcall, bfrom, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_cond(_, bcall, i, arg),
+c1 = count:{arg_match_helper(tjump, bfrom, _, _)},
+c2 = count:{argument(_, bfrom, _)}, c1 = c2.
+*/
+
+call_sanitize_cond(bcall, bfrom, i, acall) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_cond(_, bcall, i, arg),
+transferArgument(tjump, acall, idx), argument(arg, bcall, idx), argument(acall, _, _).
+
+
+//TODO 0601
+.decl call_sanitize_def(call_block: Block, pre_block: Block, sanitize_variable: SSA)
+// TODO !blockAfter is wrong, we must make sure i is untainted? const?
+// delete 0601 call_sanitize_def(barg, barg, i) :- as_helper(bvar, i), argument(arg, barg, _), block_path(bvar, barg), !blockAfter(bvar, i).
+
+//TODO 0602 not sure if cover all cases?
+
+
+// call_sanitize_def because it is trusted value by call
+call_sanitize_def(barg, barg, i) :- jump(_, _, barg, _), as_helper(bvar, i), 
+argument(arg, barg, _), block_path(bvar, barg), !taintedAfter(i, i), !ImplicitDepend(i, _).
+
+call_sanitize_def(barg, barg, i) :- jump(_, _, barg, _), as_helper(bvar, i), 
+argument(arg, barg, _), block_path(bvar, barg), guard(bvar, i), !ImplicitDepend(i, _).
+
+call_sanitize_def(barg, barg, A) :- jump(_, _, barg, _), argument(arg, barg, _), block_path(bvar, barg), 
+guard(bvar, i), !ImplicitDepend(i, _), store(i, v, B), taintedpass(A, B, _, _).
+
+call_sanitize_def(barg, barg, A) :- jump(_, _, barg, _), argument(arg, barg, _), block_path(bvar, barg), 
+as_helper(bvar, i), !taintedBefore(i, B), !ImplicitDepend(i, _), 
+store(i, v, B), taintedpass(A, B, _, _).
+// call_sanitize_def because it pass trusted values to call_sanitize_cond
+
+.decl cond_to_def_helper(acall: SSA)
+
+cond_to_def_helper(acall) :- transferArgument(_, acall, _), ImplicitDepend(acall, _).
+cond_to_def_helper(acall) :- transferArgument(_, acall, _), taintedAfter(acall, acall).
+
+call_sanitize_def(bcall, bfrom, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_cond(_, bcall, i, _),
+c1 = count:{call_sanitize_cond(_, bcall, i, arg),transferArgument(tjump, acall, idx), 
+argument(arg, bcall, idx), !cond_to_def_helper(acall)},
+c2 = count:{call_sanitize_cond(_, bcall, i, arg),transferArgument(tjump, acall, idx), 
+argument(arg, bcall, idx)}, c1 = c2.
+
+
+// Solve t20.sol acall2 implicitly depends acall1
+
+call_sanitize_def(bcall, bfrom, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_cond(_, bcall, i, _),
+call_sanitize_cond(_, bcall, i, arg1),transferArgument(tjump, acall1, idx1), 
+argument(arg1, bcall, idx1), !cond_to_def_helper(acall1),
+call_sanitize_cond(_, bcall, i, arg2),transferArgument(tjump, acall2, idx2), 
+argument(arg2, bcall, idx2), cond_to_def_helper(acall2),
+ImplicitDepend(arg2, arg1).
+
+
+call_sanitize_def_debug(bcall, bfrom, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_cond(_, bcall, i, _),
+call_sanitize_cond(_, bcall, i, arg1),transferArgument(tjump, acall1, idx1), 
+argument(arg1, bcall, idx1), !cond_to_def_helper(acall1),
+call_sanitize_cond(_, bcall, i, arg2),transferArgument(tjump, acall2, idx2), 
+argument(arg2, bcall, idx2), cond_to_def_helper(acall2),
+ImplicitDepend(arg2, arg1).
+
+// add 0601
+// before 0601
+/*
+call_sanitize_def(barg, barg, A) :- argument(arg, barg, _), block_path(bvar, barg), 
+guard(bvar, i), store(i, v, B), taintedpass(A, B, _, _).
+*/
+// modify 0601
+// TODO Implicit Depend
+// modify before call_sanitize_def(bcall, bfrom, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_def(_, bcall, i).
+call_sanitize_def(bcall, bstart, i) :- jump(tjump, bfrom, bcall, bcont), call_sanitize_def(_, bcall, i),
+block_path(bfrom, bstart).
+
+
+// By call_sanitize_def and call_sanitize_cond, some value could be trusted
+
+.decl all_trusted_arg_helper(tjump: Transfer)
+.decl untrusted_arg_helper(tjump: Transfer)
+
+
+// modify 0601
+
+all_trusted_arg_helper(tjump) :- transferArgument(tjump, _, _), c1 = count:{transferArgument(tjump, _, _)},
+c2 = count:{transferArgument(tjump, vtrusted, _), !blockAfter(bfrom, vtrusted), jump_transfer_srt_end(_, _, bfrom, _, tjump)}, c1 = c2.
+untrusted_arg_helper(tjump) :- transferArgument(tjump, _, _), c1 = count:{transferArgument(tjump, _, _)},
+c2 = count:{transferArgument(tjump, vtrusted, _), !blockAfter(bfrom, vtrusted), jump_transfer_srt_end(_, _, bfrom, _, tjump)}, c1 != c2.
+
+.decl Trusted_By_Call(b: Block, id: SSA)
+
+.decl Trusted_By_Call_Block(b: Block, id: SSA, bfrom: Block)
+Trusted_By_Call_Block(b, i, bfrom) :- as_helper(b, i), call_sanitize_cond(bcall, bfrom, i, _),
+all_trusted_arg_helper(tjump), jump(tjump, bfrom, bcall, _).
+// modify 0601 block_path(b, bfrom)
+// before modify Trusted_By_Call_Block(b, i, bfrom) :- as_helper(b, i), call_sanitize_def(bcall, bfrom, i), jump(tjump, bfrom, bcall, _).
+Trusted_By_Call_Block(b, i, bfrom) :- as_helper(b, i), call_sanitize_def(bcall, bfrom, i), jump(tjump, bfrom, bcall, _),
+block_path(b, bfrom).
+
+.decl UnTrusted_By_Call_Block(b: Block, id: SSA, bfrom: Block)
+UnTrusted_By_Call_Block(b, i, bfrom)  :- as_helper(b, i), call_sanitize_cond(bcall, bfrom, i, _),
+untrusted_arg_helper(tjump), jump(tjump, bfrom, bcall, _).
+
+
+.decl several_trusted_call_helper(b: Block, id: SSA)
+several_trusted_call_helper(b, i) :- Trusted_By_Call_Block(b, i, bgood), block_path(bbad, bgood), 
+UnTrusted_By_Call_Block(b, i, bbad).
+
+
+Trusted_By_Call(b, i) :- Trusted_By_Call_Block(b, i, bgood), !several_trusted_call_helper(b, i).
+
+
+// TODO0528 even if it is trusted by call, it is possible that it is tainted after later execution
+
+
+
+
+
+// TODO: not sure first state
+// TODO: If we should consider a block with no statement
+.decl first_state(id: SSA)
+.decl last_state(id: SSA)
+.decl only_state(id: SSA)
+first_state(id) :- statement(id), c = count:{follows(id, _)}, c = 0.
+last_state(id) :- statement(id), c = count:{follows(_, id)}, c = 0.
+// TODO: blockStmt(_, id)?
+only_state(id) :- statement(id), !follows(_, id), !follows(_, id).
+
+
+.decl taintedBefore(statement_id:SSA, var_id:SSA)
+.decl taintedAfter(statement_id:SSA, var_id:SSA)
+.decl blockBefore(id_Block: Block, var_id:SSA)
+.decl blockAfter(id_Block: Block, var_id:SSA)
+.decl first_block(id_Block: Block)
+
+first_block(b) :- block(b), !goto(_, _, b), !jump(_, _, _, b), !branch(_, _, _, b, _, _), !branch(_, _, _, _, b, _).
+
+
+// BlockBefore
+// 1. goto
+// if has previous block and the previous blockafter is tainted
+blockBefore(b1, A) :- goto(_, b2, b1), blockAfter(b2, A).
+// if has no previous block, it is affected by the function argument.
+// argument(id_arg: SSA, id_block: Block, index: ArgIndex)
+blockBefore(b1, A) :- first_block(b1), argument(A, b1, _).
+// TODO: if delete: if has no previous block, it is also affected by the msgsender.
+// blockBefore(b1, A) :- first_block(b1), msgSender(A).
+
+
+// 2. Conditional branching 
+// Conditional branching (think of two Goto's for each true/false branch)
+// branch(idtrue, idfalse, bfrom, btrue, bfalse, condid)
+blockBefore(b1, A) :- branch(_, _, b2, b1, _, _), blockAfter(b2, A).
+blockBefore(b1, A) :- branch(_, _, b2, _, b1, _), blockAfter(b2, A).
+
+// 3. Jump
+// jump(id_transfer, id_block_from, id_block_to, id_continuation)
+// case1: Affected by the id_block_to
+blockBefore(b3, A) :- jump(_, _, b2, b3), blockAfter(b2, A).
+// case2: Affected by the id_block_from
+blockBefore(b3, A) :- jump(_, b1, _, b3), blockAfter(b1, A).
+
+
+
+// BlockAfter
+// 1. goto
+// if block has statement
+blockAfter(b1, A) :- blockStmt(b1, i1), last_state(i1), taintedAfter(i1, A).
+// if block has no statement
+blockAfter(b1, A) :- blockBefore(b1, A), !blockStmt(b1, _).
+
+
+
+// taintedBefore
+// .decl follows(id_next: SSA, id_prev: SSA)
+
+taintedBefore(i1, A) :- follows(i1, i2), taintedAfter(i2, A), !sanitize(i2, A).
+// debugBefore(i1, A) :- follows(i1, i2), taintedAfter(i2, A), !sanitize(i1, A).
+// Goto transfer with id `id_transfer` from `id_block_from` to `id_block_to`
+// .decl goto(id_transfer: Transfer, id_block_from: Block, id_block_to: Block)
+taintedBefore(i1, A) :- first_state(i1), blockStmt(b1, i1), blockBefore(b1, A), !sanitize(i1, A).
+//0525 add argument is taintedbefore
+taintedBefore(i1, A) :- i1 = A, argument(A, _, _).
+taintedBefore(i1, A) :- bop(i1, A, _, _), argument(A, _, _).
+taintedBefore(i1, A) :- bop(i1, _, A, _), argument(A, _, _).
+taintedBefore(i1, A) :- uop(i1, A, _), argument(A, _, _).
+
+//0524: tricky for guard
+.decl taintedBeforeForguard(statement_id:SSA, var_id:SSA)
+taintedBeforeForguard(id, A) :- taintedBefore(id, A) .
+taintedBeforeForguard(cond_id, left) :- blockStmt(b1, left),
+branch(_, _, b1, b2, _, cond_id), bop(cond_id, left, right, _), 
+blockStmt(b2, i), store(i, v, vul), taintedBefore(i, vul), load(left, v),
+!argument(vul, b3, _), first_block(b3), block_path(b2, b3).
+taintedBeforeForguard(cond_id, right) :- blockStmt(b1, left),
+branch(_, _, b1, b2, _, cond_id), bop(cond_id, left, right, _),
+blockStmt(b2, i), store(i, v, vul), taintedBefore(i, vul), load(right, v),
+!argument(vul, b3, _), first_block(b3), block_path(b2, b3).
+taintedBeforeForguard(cond_id, left) :- blockStmt(b1, left),
+branch(_, _, b1, _, b2, cond_id), bop(cond_id, left, right, _),
+blockStmt(b2, i), store(i, v, vul), taintedBefore(i, vul), load(left, v),
+!argument(vul, b3, _), first_block(b3), block_path(b2, b3).
+taintedBeforeForguard(cond_id, right) :- blockStmt(b1, left),
+branch(_, _, b1, _, b2, cond_id), bop(cond_id, left, right, _),
+blockStmt(b2, i), store(i, v, vul), taintedBefore(i, vul), load(right, v),
+!argument(vul, b3, _), first_block(b3), block_path(b2, b3).
+
+
+// taintedAfter
+
+taintedAfter(id, A) :- taintedBefore(id, A), !sanitize(id, A).
+
+
+taintedAfter(id, A) :- id = A, msgSender(A).
+// assign(TODO)
+// A = B and B is tainted before thie statement.
+taintedAfter(id, A) :- assign(A, B), taintedBefore(id, B).
+//0525 add                                                                         
+taintedAfter(A, A) :- assign(A, B), taintedBefore(B, B).
+// taintedAfter(id, A) :- assign(id, _), taintedBefore(id, A).
+// const
+taintedAfter(id, A) :- const(id, _), taintedBefore(id, A).
+// uop(TODO)
+taintedAfter(id, B) :- id = B, uop(id, A, _), taintedBefore(id, A).
+// taintedAfter(id, A) :- uop(id, _, _), taintedBefore(id, A).
+
+// bop(TODO)
+taintedAfter(id, A) :- bop(A, B, _, _), taintedBefore(id, B).
+taintedAfter(id, A) :- bop(A, _, B, _), taintedBefore(id, B).
+// taintedAfter(id, B) :- bop(id, _, _, _), taintedBefore(id, B).
+
+// TODO: load store
+// .decl load(id: SSA, field: Name)                        // Storage field read
+// .decl store(id: SSA, field: Name, var_id: SSA)          // Storage field write
+
+
+
+//taintedAfter(id, A) :- id = A, load(A, v), follows(A, id2), 
+// store(id2, v, B), taintedBefore(id2, B), .
+
+.decl helper_function(ida: SSA, idb: SSA, v: Name)
+helper_function(ida, idb, v) :- state_path(idb, ida), store(idb, v, _).
+
+taintedAfter(id, A) :- id = A, load(A, v), state_path(A, id2), 
+store(id2, v, B), taintedBefore(id2, B), !helper_function(id2, _, v).
+
+// some tainted value stored in other blocks (A follows nothing)
+taintedAfter(id, A) :- id = A, load(A, v), !follows(A, _), 
+blockStmt(b1, A), store(id2, v, B), blockStmt(b2, id2), 
+!block_path(b2, b1), taintedBefore(id2, B), !helper_function(id2, _, v).
+
+// some tainted value stored in other blocks (A state after id3, but id3 is not store)
+taintedAfter(id, A) :- id = A, load(A, v), state_path(A, id3), 
+!store(id3, _, _), blockStmt(b1, A), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), taintedBefore(id2, B), 
+!helper_function(id2, _, v).
+
+// some tainted value stored in other blocks (A state after id3, id3 store something but is not v)
+taintedAfter(id, A) :- id = A, load(A, v), state_path(A, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, A), store(id2, v, B), 
+blockStmt(b2, id2),  b1 != b2, !block_path(b2, b1), taintedBefore(id2, B), 
+!helper_function(id2, _, v).
+
+.decl tainteddebug(statement_id:SSA, var_id:SSA)
+
+// some tainted value stored in other blocks (A state after id3, id3 store something but is not v)
+tainteddebug(id, A) :- id = A, load(A, v), state_path(A, id3), 
+store(id3, v3, _), v!=v3, blockStmt(b1, A), store(id2, v, B), 
+blockStmt(b2, id2), b1 != b2, !block_path(b2, b1), taintedBefore(id2, B), 
+!helper_function(id2, _, v).
+
+
+
+
+// TODO: structLoad structStore msgSender
+
+// The address must be a trusted address
+
+
+
+
+//tainted_sinks(id) :- selfdestruct(id, A), taintedBefore(id, A).
+tainted_sinks(id) :- selfdestruct(id, A), taintedBefore(id, A), blockStmt(b1, id), !final_guard(b1, A).
+// add 0601
+tainted_sinks(id) :- selfdestruct(id, A), ImplicitDepend(A, _), blockStmt(b1, id), !final_guard(b1, A).
+//0524 tainted_sinks(id) :- selfdestruct(id, A), blockAfter(b, A), !final_guard(b, A), !sanitize(_, A).
+.decl debug_sinks(id: SSA)
+debug_sinks(id) :-  selfdestruct(id, A), taintedBefore(id, A), blockStmt(b1, id), !final_guard(b1, A).
+
+
+.output tainted_sinks
+/*
+// .output debugtainted
+.output good_vguard
+.output DirectdepSSA
+.output variable_guard
+.output variable_affected
+.output debug_sinks
+.output blockBefore
+.output blockAfter
+.output taintedBefore
+.output taintedAfter
+.output load
+.output store
+.output const
+.output assign
+.output sanitize
+.output msgSender
+.output state_path
+.output branch
+.output guard
+.output guard_helper
+.output final_guard
+.output DirectdepMS
+.output tainteddebug
+.output jump
+.output return 
+.output revert
+.output transferArgument 
+.output argument
+.output conditional_guard_a
+.output conditional_guard_b
+.output conditional_guard_c
+.output conditional_guard_d
+.output tmp_conditional_guard_a
+.output tmp_conditional_guard_b
+.output tmp_conditional_guard_c
+.output tmp_conditional_guard_d
+.output cguard_valid_a
+.output cguard_valid_b
+.output cguard_valid_c
+.output cguard_valid_d
+.output cnt1
+.output cnt2
+.output DirectdepArg
+.output block_path
+.output bop
+.output taintedpass
+.output fguard
+.output debugfguard
+.output bad_conditional_guard
+.output taintedBeforeForguard
+//.output cguard_valid_a_debug
+.output DMSloadstore
+.output DMSloadstoregood
+.output blockStmt
+.output first_state
+.output call_sanitize_cond
+.output call_sanitize_def
+.output UnTrusted_By_Call_Block
+.output Trusted_By_Call_Block
+.output Trusted_By_Call
+//.output call_sanitize_cond_debug
+.output ImplicitDependarg
+.output ImplicitDependtaint
+.output BlockImplicitDependtaint
+.output goto
+.output taintedpassforcg
+.output good_vguard
+.output variable_guard
+.output good_fguard
+.output ImplicitDepend
+.output IDhelper
+.output as_helper
+.output all_arg_untainted
+.output jump_transfer
+.output jump_transfer_srt_end
+.output all_arg_untainted_helper
+.output vguard_helper
+.output call_guard_a
+.output BlockImplicitDependarg
+
+.output all_trusted_arg_helper
+.output exist_bad_arg
+.output cond_to_def_helper
+.output call_sanitize_def_debug
+.output jump_transfer_srt_end_deter
+*/
